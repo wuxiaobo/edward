@@ -5,52 +5,54 @@ from __future__ import division
 from __future__ import print_function
 
 import edward as ed
-import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
-from edward.models import Empirical, Normal
+from edward.models import Normal
 from edward.util import get_session, Progbar
 
-ed.set_seed(42)
 
-# DATA
+def model():
+  """Normal-Normal with known variance."""
+  mu = Normal(loc=0.0, scale=1.0, name="mu")
+  x = Normal(loc=mu, scale=1.0, sample_shape=50, name="x")
+  return x
+
+
+def variational():
+  qmu = Normal(loc=tf.get_variable("loc", []),
+               scale=tf.nn.softplus(tf.get_variable("shape", [])),
+               name="qmu")
+  return qmu
+
+
+variational = tf.make_template("variational", variational)
+
+ed.set_seed(42)
 x_data = np.array([0.0] * 50)
 
-# MODEL: Normal-Normal with known variance
-mu = Normal(loc=0.0, scale=1.0)
-x = Normal(loc=tf.ones(50) * mu, scale=1.0)
-
-# INFERENCE
-qmu = Normal(loc=tf.Variable(0.0), scale=tf.nn.softplus(tf.Variable(1.0))+1e-3)
-
 # analytic solution: N(loc=0.0, scale=\sqrt{1/51}=0.140)
-loss, grads_and_vars = ed.klqp({mu: qmu}, data={x: x_data})
+loss = ed.klqp_reparameterization(
+    model,
+    variational,
+    align_latent=lambda name: 'qmu' if name == 'mu' else name,
+    align_data=lambda name: 'x_data' if name == 'x' else name,
+    x_data=x_data)
 
-train_op = tf.train.AdamOptimizer().apply_gradients(grads_and_vars)
-progbar = Progbar(1000)
+var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+grads = tf.gradients(loss, var_list)
+grads_and_vars = list(zip(grads, var_list))
+train_op = tf.train.AdamOptimizer(1e-2).apply_gradients(grads_and_vars)
+
+qmu = variational()  # TODO why is this uninitialized?
 sess = get_session()
+
+progbar = Progbar(5000)
 tf.global_variables_initializer().run()
-for t in range(1, 1001):
+for t in range(1, 5001):
   loss_val, _ = sess.run([loss, train_op])
   if t % 50 == 0:
-    progbar.update(t, {"Loss": loss_val})
-
-# # CRITICISM
-sess = get_session()
-mean, stddev = sess.run([qmu.mean(), qmu.stddev()])
-print("Inferred posterior mean:")
-print(mean)
-print("Inferred posterior stddev:")
-print(stddev)
-
-# Check convergence with visual diagnostics.
-# samples = sess.run(qmu.params)
-
-# # Plot histogram.
-# plt.hist(samples, bins='auto')
-# plt.show()
-
-# # Trace plot.
-# plt.plot(samples)
-# plt.show()
+    mean, stddev = sess.run([qmu.mean(), qmu.stddev()])
+    progbar.update(t, {"Loss": loss_val,
+                       "Posterior mean": mean,
+                       "Posterior stddev": stddev})
